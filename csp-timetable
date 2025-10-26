@@ -1,0 +1,404 @@
+import time
+import matplotlib.pyplot as plt
+import numpy as np
+from copy import deepcopy
+
+class TimetableCSP:
+    def __init__(self):
+        self.subjects = ['phy', 'chem', 'math', 'bio', 'pe', 'comp']
+        self.slots = [1, 2, 3, 4]
+        self.constraints = [
+            # math, phy, chem cannot be in the same slot
+            lambda assignment: not (assignment.get('math') == assignment.get('phy') and 
+                                   assignment.get('math') is not None),
+            lambda assignment: not (assignment.get('math') == assignment.get('chem') and 
+                                   assignment.get('math') is not None),
+            lambda assignment: not (assignment.get('phy') == assignment.get('chem') and 
+                                   assignment.get('phy') is not None),
+            
+            # bio, phy, chem cannot be in the same slot
+            lambda assignment: not (assignment.get('bio') == assignment.get('phy') and 
+                                   assignment.get('bio') is not None),
+            lambda assignment: not (assignment.get('bio') == assignment.get('chem') and 
+                                   assignment.get('bio') is not None),
+            
+            # no class can be in the same slot as PE
+            lambda assignment: not (assignment.get('pe') == assignment.get('phy') and 
+                                   assignment.get('pe') is not None),
+            lambda assignment: not (assignment.get('pe') == assignment.get('chem') and 
+                                   assignment.get('pe') is not None),
+            lambda assignment: not (assignment.get('pe') == assignment.get('math') and 
+                                   assignment.get('pe') is not None),
+            lambda assignment: not (assignment.get('pe') == assignment.get('bio') and 
+                                   assignment.get('pe') is not None),
+            lambda assignment: not (assignment.get('pe') == assignment.get('comp') and 
+                                   assignment.get('pe') is not None),
+        ]
+        
+    def is_consistent(self, assignment):
+        """Check if the current assignment satisfies all constraints"""
+        for constraint in self.constraints:
+            if not constraint(assignment):
+                return False
+        return True
+    
+    def is_value_consistent(self, variable, value, assignment):
+        """Check if assigning value to variable is consistent"""
+        test_assignment = assignment.copy()
+        test_assignment[variable] = value
+        return self.is_consistent(test_assignment)
+
+
+class BacktrackingWithHeuristics:
+    def __init__(self, csp):
+        self.csp = csp
+        self.nodes_explored = 0
+        self.backtracks = 0
+        self.assignment_count = 0
+        
+    def select_unassigned_variable(self, assignment):
+        """MRV (Minimum Remaining Values) heuristic - choose variable with fewest legal values"""
+        unassigned = [v for v in self.csp.subjects if v not in assignment]
+        
+        # Count legal values for each unassigned variable
+        mrv_counts = []
+        for var in unassigned:
+            legal_values = sum(1 for val in self.csp.slots 
+                             if self.csp.is_value_consistent(var, val, assignment))
+            mrv_counts.append((legal_values, var))
+        
+        # Return variable with minimum remaining values (with tie-breaking by name)
+        return min(mrv_counts)[1] if mrv_counts else None
+    
+    def order_domain_values(self, variable, assignment):
+        """LCV (Least Constraining Value) heuristic - prefer values that rule out fewer choices"""
+        values_with_constraints = []
+        
+        for value in self.csp.slots:
+            if not self.csp.is_value_consistent(variable, value, assignment):
+                continue
+                
+            # Count how many values this choice rules out for other variables
+            constrained_count = 0
+            test_assignment = assignment.copy()
+            test_assignment[variable] = value
+            
+            for other_var in self.csp.subjects:
+                if other_var not in test_assignment:
+                    for other_val in self.csp.slots:
+                        if not self.csp.is_value_consistent(other_var, other_val, test_assignment):
+                            constrained_count += 1
+            
+            values_with_constraints.append((constrained_count, value))
+        
+        # Return values sorted by least constraining first
+        return [val for _, val in sorted(values_with_constraints)]
+    
+    def backtrack(self, assignment):
+        """Backtracking search with MRV and LCV heuristics"""
+        self.nodes_explored += 1
+        
+        # Check if assignment is complete
+        if len(assignment) == len(self.csp.subjects):
+            return assignment
+        
+        # Select next variable using MRV
+        var = self.select_unassigned_variable(assignment)
+        
+        # Try values in order given by LCV
+        for value in self.order_domain_values(var, assignment):
+            self.assignment_count += 1
+            assignment[var] = value
+            
+            if self.csp.is_consistent(assignment):
+                result = self.backtrack(assignment)
+                if result is not None:
+                    return result
+            
+            # Backtrack
+            del assignment[var]
+            self.backtracks += 1
+        
+        return None
+    
+    def solve(self):
+        """Solve the CSP and return solution with metrics"""
+        start_time = time.time()
+        solution = self.backtrack({})
+        elapsed_time = time.time() - start_time
+        
+        return {
+            'solution': solution,
+            'nodes_explored': self.nodes_explored,
+            'backtracks': self.backtracks,
+            'assignments': self.assignment_count,
+            'time': elapsed_time
+        }
+
+
+class BacktrackingWithForwardChecking:
+    def __init__(self, csp):
+        self.csp = csp
+        self.nodes_explored = 0
+        self.backtracks = 0
+        self.assignment_count = 0
+        self.forward_checks = 0
+        
+    def forward_check(self, variable, value, assignment, domains):
+        """Perform forward checking: remove inconsistent values from domains"""
+        new_domains = deepcopy(domains)
+        
+        for other_var in self.csp.subjects:
+            if other_var in assignment or other_var == variable:
+                continue
+            
+            # Remove values that are inconsistent with this assignment
+            values_to_remove = []
+            for other_val in new_domains[other_var]:
+                self.forward_checks += 1
+                test_assignment = assignment.copy()
+                test_assignment[variable] = value
+                test_assignment[other_var] = other_val
+                
+                if not self.csp.is_consistent(test_assignment):
+                    values_to_remove.append(other_val)
+            
+            for val in values_to_remove:
+                new_domains[other_var].remove(val)
+            
+            # Domain wipeout - no solution possible
+            if len(new_domains[other_var]) == 0:
+                return None
+        
+        return new_domains
+    
+    def backtrack(self, assignment, domains):
+        """Backtracking search with forward checking"""
+        self.nodes_explored += 1
+        
+        # Check if assignment is complete
+        if len(assignment) == len(self.csp.subjects):
+            return assignment
+        
+        # Select next unassigned variable (simple ordering)
+        var = next(v for v in self.csp.subjects if v not in assignment)
+        
+        # Try each value in the current domain
+        for value in domains[var]:
+            self.assignment_count += 1
+            
+            # Check if assignment is consistent
+            if self.csp.is_value_consistent(var, value, assignment):
+                assignment[var] = value
+                
+                # Perform forward checking
+                new_domains = self.forward_check(var, value, assignment, domains)
+                
+                if new_domains is not None:
+                    result = self.backtrack(assignment, new_domains)
+                    if result is not None:
+                        return result
+                
+                # Backtrack
+                del assignment[var]
+                self.backtracks += 1
+        
+        return None
+    
+    def solve(self):
+        """Solve the CSP and return solution with metrics"""
+        # Initialize domains
+        domains = {var: list(self.csp.slots) for var in self.csp.subjects}
+        
+        start_time = time.time()
+        solution = self.backtrack({}, domains)
+        elapsed_time = time.time() - start_time
+        
+        return {
+            'solution': solution,
+            'nodes_explored': self.nodes_explored,
+            'backtracks': self.backtracks,
+            'assignments': self.assignment_count,
+            'forward_checks': self.forward_checks,
+            'time': elapsed_time
+        }
+
+
+def visualize_timetable(solution, title):
+    """Visualize the timetable solution"""
+    if solution is None:
+        print(f"{title}: No solution found")
+        return
+    
+    # Create a grid for visualization
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Group subjects by slot
+    slots_subjects = {slot: [] for slot in range(1, 5)}
+    for subject, slot in solution.items():
+        slots_subjects[slot].append(subject)
+    
+    # Create table data
+    table_data = []
+    for slot in range(1, 5):
+        subjects = ', '.join(slots_subjects[slot])
+        table_data.append([f'Slot {slot}', subjects])
+    
+    # Create table
+    table = ax.table(cellText=table_data, colLabels=['Time Slot', 'Subjects'],
+                     cellLoc='center', loc='center',
+                     colWidths=[0.3, 0.7])
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1, 3)
+    
+    # Style the table
+    for i in range(len(table_data) + 1):
+        for j in range(2):
+            cell = table[(i, j)]
+            if i == 0:
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+            else:
+                cell.set_facecolor('#E8F5E9' if i % 2 == 0 else '#F1F8E9')
+    
+    ax.axis('off')
+    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
+    
+    return fig
+
+
+def compare_performance(result1, result2):
+    """Compare and visualize performance metrics"""
+    metrics = ['Nodes Explored', 'Backtracks', 'Assignments', 'Time (ms)']
+    
+    values1 = [
+        result1['nodes_explored'],
+        result1['backtracks'],
+        result1['assignments'],
+        result1['time'] * 1000
+    ]
+    
+    values2 = [
+        result2['nodes_explored'],
+        result2['backtracks'],
+        result2['assignments'],
+        result2['time'] * 1000
+    ]
+    
+    # Create comparison plot
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Performance Comparison: Heuristics vs Forward Checking', 
+                 fontsize=16, fontweight='bold')
+    
+    colors1 = '#2196F3'
+    colors2 = '#FF9800'
+    
+    for idx, (metric, val1, val2) in enumerate(zip(metrics, values1, values2)):
+        row = idx // 2
+        col = idx % 2
+        ax = axes[row, col]
+        
+        x = np.arange(2)
+        width = 0.6
+        
+        bars = ax.bar(x, [val1, val2], width, color=[colors1, colors2], alpha=0.8)
+        
+        ax.set_ylabel(metric, fontsize=12, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(['Heuristics\n(MRV + LCV)', 'Forward\nChecking'])
+        ax.set_title(metric, fontsize=13, fontweight='bold', pad=10)
+        ax.grid(axis='y', alpha=0.3)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.2f}' if metric == 'Time (ms)' else f'{int(height)}',
+                   ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    return fig
+
+
+def main():
+    print("=" * 70)
+    print("TIMETABLE GENERATION AS CONSTRAINT SATISFACTION PROBLEM")
+    print("=" * 70)
+    print("\nSubjects: phy, chem, math, bio, pe, comp")
+    print("Slots: 1, 2, 3, 4")
+    print("\nConstraints:")
+    print("1. math, phy, chem cannot be in the same slot")
+    print("2. bio, phy, chem cannot be in the same slot")
+    print("3. No class can be in the same slot as PE")
+    print("=" * 70)
+    
+    # Initialize CSP
+    csp = TimetableCSP()
+    
+    # Method 1: Backtracking with Heuristics (MRV + LCV)
+    print("\n\n[1] BACKTRACKING WITH VARIABLE & VALUE ORDERING HEURISTICS")
+    print("-" * 70)
+    solver1 = BacktrackingWithHeuristics(csp)
+    result1 = solver1.solve()
+    
+    print(f"Solution found: {result1['solution']}")
+    print(f"\nPerformance Metrics:")
+    print(f"  • Nodes Explored: {result1['nodes_explored']}")
+    print(f"  • Backtracks: {result1['backtracks']}")
+    print(f"  • Assignments Tried: {result1['assignments']}")
+    print(f"  • Time: {result1['time']*1000:.4f} ms")
+    
+    # Method 2: Backtracking with Forward Checking
+    print("\n\n[2] BACKTRACKING WITH FORWARD CHECKING")
+    print("-" * 70)
+    solver2 = BacktrackingWithForwardChecking(csp)
+    result2 = solver2.solve()
+    
+    print(f"Solution found: {result2['solution']}")
+    print(f"\nPerformance Metrics:")
+    print(f"  • Nodes Explored: {result2['nodes_explored']}")
+    print(f"  • Backtracks: {result2['backtracks']}")
+    print(f"  • Assignments Tried: {result2['assignments']}")
+    print(f"  • Forward Checks: {result2['forward_checks']}")
+    print(f"  • Time: {result2['time']*1000:.4f} ms")
+    
+    # Analysis
+    print("\n\n[3] COMPARATIVE ANALYSIS")
+    print("=" * 70)
+    
+    improvement_nodes = ((result1['nodes_explored'] - result2['nodes_explored']) / 
+                         result1['nodes_explored'] * 100) if result1['nodes_explored'] > 0 else 0
+    improvement_backtracks = ((result1['backtracks'] - result2['backtracks']) / 
+                              result1['backtracks'] * 100) if result1['backtracks'] > 0 else 0
+    
+    print(f"Forward Checking vs Heuristics:")
+    print(f"  • Nodes Explored: {improvement_nodes:+.1f}% change")
+    print(f"  • Backtracks: {improvement_backtracks:+.1f}% change")
+    
+    if result1['time'] > 0:
+        print(f"  • Time Efficiency: {(result2['time']/result1['time']):.2f}x")
+    else:
+        print(f"  • Time Efficiency: Too fast to measure accurately")
+    
+    if result2['nodes_explored'] < result1['nodes_explored']:
+        print(f"\n✓ Forward Checking explored fewer nodes!")
+    else:
+        print(f"\n✓ Heuristics explored fewer nodes!")
+    
+    # Visualizations
+    fig1 = visualize_timetable(result1['solution'], 
+                               'Timetable Solution (Heuristics: MRV + LCV)')
+    fig2 = visualize_timetable(result2['solution'], 
+                               'Timetable Solution (Forward Checking)')
+    fig3 = compare_performance(result1, result2)
+    
+    plt.show()
+    
+    print("\n" + "=" * 70)
+    print("Visualizations generated successfully!")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
